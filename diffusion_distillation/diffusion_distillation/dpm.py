@@ -124,15 +124,21 @@ def predict_v_from_x_and_eps(*, x, eps, logsnr):
 class Model:
 
   def __init__(self, model_fn, *, mean_type, logvar_type, logvar_coeff,
+               constant_params=None,
                target_model_fn=None):
     self.model_fn = model_fn
     self.mean_type = mean_type
     self.logvar_type = logvar_type
     self.logvar_coeff = logvar_coeff
     self.target_model_fn = target_model_fn
+    self.constant_params = constant_params
 
-  def _run_model(self, *, z, logsnr, model_fn, clip_x):
-    model_output = model_fn(z, logsnr)
+  def _run_model(self, *, z, logsnr, model_fn, clip_x, params=None):
+    params = params or self.constant_params
+    if params is not None:
+        model_output = model_fn(z, logsnr, params)
+    else:
+        model_output = model_fn(z, logsnr)
     if self.mean_type == 'eps':
       model_eps = model_output
     elif self.mean_type == 'x':
@@ -173,7 +179,7 @@ class Model:
             'model_v': model_v}
 
   def predict(self, *, z_t, logsnr_t, logsnr_s, clip_x=None,
-              model_output=None, model_fn=None):
+              model_output=None, model_fn=None, params=None):
     """p(z_s | z_t)."""
     assert logsnr_t.shape == logsnr_s.shape == (z_t.shape[0],)
     if model_output is None:
@@ -181,7 +187,9 @@ class Model:
       if model_fn is None:
         model_fn = self.model_fn
       model_output = self._run_model(
-          z=z_t, logsnr=logsnr_t, model_fn=model_fn, clip_x=clip_x)
+          z=z_t, logsnr=logsnr_t,
+          model_fn=model_fn, clip_x=clip_x,
+          params=params)
 
     logsnr_t = utils.broadcast_from_left(logsnr_t, z_t.shape)
     logsnr_s = utils.broadcast_from_left(logsnr_s, z_t.shape)
@@ -202,7 +210,7 @@ class Model:
     out['pred_x'] = pred_x
     return out
 
-  def vb(self, *, x, z_t, logsnr_t, logsnr_s, model_output):
+  def vb(self, *, x, z_t, logsnr_t, logsnr_s, model_output, params=None):
     assert x.shape == z_t.shape
     assert logsnr_t.shape == logsnr_s.shape == (z_t.shape[0],)
     q_dist = diffusion_reverse(
@@ -213,14 +221,14 @@ class Model:
         x_logvar='small')
     p_dist = self.predict(
         z_t=z_t, logsnr_t=logsnr_t, logsnr_s=logsnr_s,
-        model_output=model_output)
+        model_output=model_output, params=params)
     kl = utils.normal_kl(
         mean1=q_dist['mean'], logvar1=q_dist['logvar'],
         mean2=p_dist['mean'], logvar2=p_dist['logvar'])
     return utils.meanflat(kl) / onp.log(2.)
 
   def training_losses(self, *, x, rng, logsnr_schedule_fn,
-                      num_steps, mean_loss_weight_type):
+                      num_steps, mean_loss_weight_type, params=None):
     assert x.dtype in [jnp.float32, jnp.float64]
     assert isinstance(num_steps, int)
     rng = utils.RngGen(rng)
@@ -264,7 +272,8 @@ class Model:
       teach_out_mid = self._run_model(z=z_mid,
                                       logsnr=logsnr_mid,
                                       model_fn=self.target_model_fn,
-                                      clip_x=False)
+                                      clip_x=False,
+                                      params=params)
       x_pred = teach_out_mid['model_x']
       eps_pred = teach_out_mid['model_eps']
 
@@ -308,15 +317,17 @@ class Model:
       raise NotImplementedError(mean_loss_weight_type)
     return {'loss': loss}
 
-  def ddim_step(self, i, z_t, num_steps, logsnr_schedule_fn, clip_x):
+  def ddim_step(self, i, z_t, num_steps, logsnr_schedule_fn, clip_x, params=None):
     shape, dtype = z_t.shape, z_t.dtype
     logsnr_t = logsnr_schedule_fn((i + 1.).astype(dtype) / num_steps)
     logsnr_s = logsnr_schedule_fn(i.astype(dtype) / num_steps)
+    
     model_out = self._run_model(
         z=z_t,
         logsnr=jnp.full((shape[0],), logsnr_t),
         model_fn=self.model_fn,
-        clip_x=clip_x)
+        clip_x=clip_x,
+        params=params)
     x_pred_t = model_out['model_x']
     eps_pred_t = model_out['model_eps']
     stdv_s = jnp.sqrt(nn.sigmoid(-logsnr_s))
@@ -324,7 +335,7 @@ class Model:
     z_s_pred = alpha_s * x_pred_t + stdv_s * eps_pred_t
     return jnp.where(i == 0, x_pred_t, z_s_pred)
 
-  def bwd_dif_step(self, rng, i, z_t, num_steps, logsnr_schedule_fn, clip_x):
+  def bwd_dif_step(self, rng, i, z_t, num_steps, logsnr_schedule_fn, clip_x, params):
     shape, dtype = z_t.shape, z_t.dtype
     logsnr_t = logsnr_schedule_fn((i + 1.).astype(dtype) / num_steps)
     logsnr_s = logsnr_schedule_fn(i.astype(dtype) / num_steps)
@@ -332,20 +343,21 @@ class Model:
         z_t=z_t,
         logsnr_t=jnp.full((shape[0],), logsnr_t),
         logsnr_s=jnp.full((shape[0],), logsnr_s),
-        clip_x=clip_x)
+        clip_x=clip_x,
+        params=params)
     eps = jax.random.normal(
         jax.random.fold_in(rng, i), shape=shape, dtype=dtype)
     return jnp.where(
         i == 0, z_s_dist['pred_x'], z_s_dist['mean'] + z_s_dist['std'] * eps)
 
   def sample_loop(self, *, rng, init_x, num_steps,
-                  logsnr_schedule_fn, sampler, clip_x):
+                  logsnr_schedule_fn, sampler, clip_x, params=None):
     if sampler == 'ddim':
       body_fun = lambda i, z_t: self.ddim_step(
-          i, z_t, num_steps, logsnr_schedule_fn, clip_x)
+          i, z_t, num_steps, logsnr_schedule_fn, clip_x, params)
     elif sampler == 'noisy':
       body_fun = lambda i, z_t: self.bwd_dif_step(
-          rng, i, z_t, num_steps, logsnr_schedule_fn, clip_x)
+          rng, i, z_t, num_steps, logsnr_schedule_fn, clip_x, params)
     else: raise NotImplementedError(sampler)
 
     # loop over t = num_steps-1, ..., 0

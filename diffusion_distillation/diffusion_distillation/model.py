@@ -38,7 +38,8 @@ import numpy as onp
 @flax.struct.dataclass
 class TrainState:
   step: int
-  optimizer: Union[flax.optim.Optimizer, None]
+  # TODO(amilmerchant): enable optimizer from optax
+  optimizer: Any
   ema_params: Any
   num_sample_steps: int
 
@@ -98,13 +99,14 @@ class Model:
         utils.count_params(init_params)))
 
     # Make the optimizer
-    optimizer_def = self.make_optimizer_def()
+    # optimizer_def = self.make_optimizer_def()
 
     # For ema_params below, copy so that pmap buffer donation doesn't donate the
     # same buffer twice
     return TrainState(
         step=0,
-        optimizer=optimizer_def.create(init_params),
+        optimizer=None,
+        # optimizer=optimizer_def.create(init_params),
         ema_params=utils.copy_pytree(init_params),
         num_sample_steps=self.config.model.train_num_steps)
 

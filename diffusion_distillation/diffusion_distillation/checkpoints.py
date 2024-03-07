@@ -127,7 +127,7 @@ def latest_checkpoint_path(ckpt_dir, prefix):
 def check_and_convert_gcs_filepath(filepath, raise_if_not_gcs=False):
   """Utility for loading model checkpoints from GCS."""
   if filepath[:5] == 'gs://':
-    local_filepath = '/temp/download/' + filepath[5:]
+    local_filepath = '/home/amilmerchant/download/' + filepath[5:]
     if os.path.exists(local_filepath):
       print('loading from local copy of GCS file: ' + local_filepath)
     else:
@@ -145,8 +145,9 @@ def check_and_convert_gcs_filepath(filepath, raise_if_not_gcs=False):
 
 def restore_from_path(ckpt_path, target):
   ckpt_path = check_and_convert_gcs_filepath(ckpt_path)
+  print("CKPT PATH", ckpt_path)
   logging.info('Restoring checkpoint from %s', ckpt_path)
-  with gfile.GFile(ckpt_path, 'rb') as fp:
+  with open(ckpt_path, 'rb') as fp:
     return serialization.from_bytes(target, fp.read())
 
 
